@@ -1,18 +1,19 @@
 # -*- coding: utf-8 -*-
 """
 ===================================
-BitgetFetcher - BitGet 股票代币数据源
+BitgetFetcher - BitGet 合约数据源
 ===================================
 
-BitGet 支持股票代币化交易（如 SPCXUSDT、AAPLUSDT、TSLAUSDT 等）
-通过 BitGet 公开 API 获取 K线和实时行情
+BitGet 合约 API 获取 K线和实时行情
 
-API 文档: https://www.bitget.com/api-doc/uta/public/Get-History-Candle-Data
+API 文档:
+- 实时行情: https://www.bitget.com/zh-CN/api-doc/contract/market/Get-Ticker
+- K线数据: https://www.bitget.com/zh-CN/api-doc/contract/market/Get-Candle-Data
+- 历史K线: https://www.bitget.com/zh-CN/api-doc/contract/market/Get-History-Candle-Data
 
 特点：
 - 无需 API Key（公开市场数据）
-- 24/7 可交易
-- 数据延迟低
+- 使用 USDT 本位合约 (usdt-futures)
 - 可作为 BinanceFetcher 的备份数据源
 """
 
@@ -40,8 +41,8 @@ logger = logging.getLogger(__name__)
 # BitGet API 基础地址
 BITGET_API_BASE = "https://api.bitget.com"
 
-# 股票代币后缀
-STOCK_TOKEN_SUFFIX = "USDT"
+# 产品类型: USDT 本位合约
+PRODUCT_TYPE = "usdt-futures"
 
 # 请求超时
 _REQUEST_TIMEOUT = 10
@@ -60,10 +61,9 @@ def is_bitget_stock_token(code: str) -> bool:
     判断是否为 BitGet 股票代币（如 SPCXUSDT、AAPLUSDT）
     
     规则：以 USDT 结尾
-    BitGet 股票代币的特点是有对应的美股标的
     """
     code = (code or "").strip().upper()
-    if not code.endswith(STOCK_TOKEN_SUFFIX) or code == STOCK_TOKEN_SUFFIX:
+    if not code.endswith("USDT") or code == "USDT":
         return False
     return True
 
@@ -91,13 +91,13 @@ def _get_with_retry(url: str, params: Optional[Dict[str, Any]] = None) -> reques
 
 class BitgetFetcher(BaseFetcher):
     """
-    BitGet 数据源 - 股票代币
+    BitGet 合约数据源
     
     支持：
     - 日线数据 (daily_data)
     - 实时行情 (realtime_quote)
     
-    使用 BitGet 现货市场 API，无需 API Key
+    使用 BitGet 合约市场 API (v2)，无需 API Key
     """
     
     name = "BitgetFetcher"
@@ -119,8 +119,8 @@ class BitgetFetcher(BaseFetcher):
         """
         获取 K 线数据
         
-        API: GET /api/v3/market/history-candles
-        文档: https://www.bitget.com/api-doc/uta/public/Get-History-Candle-Data
+        API: GET /api/v2/mix/market/history-candles
+        文档: https://www.bitget.com/zh-CN/api-doc/contract/market/Get-History-Candle-Data
         """
         symbol = extract_bitget_symbol(stock_code)
         
@@ -128,14 +128,15 @@ class BitgetFetcher(BaseFetcher):
         start_ts = int(datetime.strptime(start_date, "%Y-%m-%d").timestamp() * 1000)
         end_ts = int(datetime.strptime(end_date, "%Y-%m-%d").timestamp() * 1000)
         
-        url = f"{BITGET_API_BASE}/api/v3/market/history-candles"
+        # 使用合约历史K线接口 (v2)
+        url = f"{BITGET_API_BASE}/api/v2/mix/market/history-candles"
         params = {
-            "category": "SPOT",  # 使用现货市场
             "symbol": symbol,
-            "interval": "1D",  # 日线
-            "startTime": start_ts,
-            "endTime": end_ts,
-            "limit": "100",  # 最大 100 条（BitGet 限制）
+            "productType": PRODUCT_TYPE,
+            "granularity": "1D",  # 日线
+            "startTime": str(start_ts),
+            "endTime": str(end_ts),
+            "limit": "200",  # 最大 200 条
         }
         
         try:
@@ -155,7 +156,7 @@ class BitgetFetcher(BaseFetcher):
             logger.debug(f"[BitgetFetcher] 获取K线成功: {symbol}, {len(candles)} 条")
             
             # 转换数据格式
-            # BitGet 返回格式: [timestamp, open, high, low, close, base_volume, quote_volume]
+            # BitGet 合约返回格式: [timestamp, open, high, low, close, base_volume, quote_volume]
             rows = []
             for candle in candles:
                 ts = int(candle[0])
@@ -243,6 +244,9 @@ class BitgetFetcher(BaseFetcher):
         """
         获取实时行情
         
+        API: GET /api/v2/mix/market/ticker
+        文档: https://www.bitget.com/zh-CN/api-doc/contract/market/Get-Ticker
+        
         Args:
             stock_code: 股票代码（如 SPCXUSDT）
             
@@ -251,8 +255,12 @@ class BitgetFetcher(BaseFetcher):
         """
         symbol = extract_bitget_symbol(stock_code)
         
-        url = f"{BITGET_API_BASE}/api/v3/spot/market/ticker"
-        params = {"symbol": symbol}
+        # 使用合约实时行情接口 (v2)
+        url = f"{BITGET_API_BASE}/api/v2/mix/market/ticker"
+        params = {
+            "symbol": symbol,
+            "productType": PRODUCT_TYPE,
+        }
         
         try:
             resp = _get_with_retry(url, params)
@@ -263,13 +271,24 @@ class BitgetFetcher(BaseFetcher):
                 logger.warning(f"[BitgetFetcher] 实时行情 API 返回错误: {data.get('msg', 'Unknown error')}")
                 return None
             
-            ticker = data["data"]
+            ticker_list = data["data"]
+            if not ticker_list:
+                logger.warning(f"[BitgetFetcher] 实时行情返回空数据: {symbol}")
+                return None
+            
+            ticker = ticker_list[0]
+            
+            # change24h 是涨跌幅百分比（如 -0.05638 表示 -5.638%）
+            change_pct = float(ticker.get("change24h", 0))
+            # 转换为涨跌额：price * change_pct / 100
+            price = float(ticker.get("lastPr", 0))
+            change = price * change_pct / 100 if price and change_pct else 0.0
             
             return UnifiedRealtimeQuote(
                 stock_code=symbol,
-                price=float(ticker.get("last", 0)),
-                change=float(ticker.get("change24h", 0)),
-                change_pct=float(ticker.get("change24hPct", 0)) if ticker.get("change24hPct") is not None else 0.0,
+                price=price,
+                change=change,
+                change_pct=change_pct,
                 volume=float(ticker.get("baseVolume", 0)),
                 turnover=float(ticker.get("quoteVolume", 0)),
                 high=float(ticker.get("high24h", 0)),
@@ -291,9 +310,12 @@ class BitgetFetcher(BaseFetcher):
             return None
     
     def health_check(self) -> bool:
-        """健康检查"""
-        url = f"{BITGET_API_BASE}/api/v3/spot/market/ticker"
-        params = {"symbol": "BTCUSDT"}
+        """健康检查 - 使用合约接口"""
+        url = f"{BITGET_API_BASE}/api/v2/mix/market/ticker"
+        params = {
+            "symbol": "BTCUSDT",
+            "productType": PRODUCT_TYPE,
+        }
         
         try:
             resp = _get_with_retry(url, params)
