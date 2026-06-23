@@ -101,7 +101,7 @@ class BitgetFetcher(BaseFetcher):
     """
     
     name = "BitgetFetcher"
-    priority = int(os.getenv("BITGET_PRIORITY", "0"))  # 默认最高优先级，与 BinanceFetcher 相同
+    priority = int(os.getenv("BITGET_PRIORITY", "0"))
     
     def __init__(self):
         self._session = requests.Session()
@@ -162,23 +162,22 @@ class BitgetFetcher(BaseFetcher):
                 ts = int(candle[0])
                 date_str = datetime.fromtimestamp(ts / 1000).strftime("%Y-%m-%d")
                 rows.append({
-                    "日期": date_str,
-                    "股票代码": symbol,
-                    "开盘": float(candle[1]),
-                    "收盘": float(candle[4]),
-                    "最高": float(candle[2]),
-                    "最低": float(candle[3]),
-                    "成交量": float(candle[5]),
-                    "成交额": float(candle[6]) if len(candle) > 6 else 0.0,
+                    "date": date_str,
+                    "open": float(candle[1]),
+                    "high": float(candle[2]),
+                    "low": float(candle[3]),
+                    "close": float(candle[4]),
+                    "volume": float(candle[5]),
+                    "amount": float(candle[6]) if len(candle) > 6 else 0.0,
                 })
             
             df = pd.DataFrame(rows)
             
             # 过滤日期范围
-            df["日期"] = pd.to_datetime(df["日期"])
+            df["date"] = pd.to_datetime(df["date"])
             start_dt = pd.to_datetime(start_date)
             end_dt = pd.to_datetime(end_date)
-            df = df[(df["日期"] >= start_dt) & (df["日期"] <= end_dt)]
+            df = df[(df["date"] >= start_dt) & (df["date"] <= end_dt)]
             
             return df
             
@@ -193,51 +192,14 @@ class BitgetFetcher(BaseFetcher):
             raise DataFetchError(f"BitgetFetcher 请求错误: {e}")
         except Exception as e:
             logger.error(f"[BitgetFetcher] 获取 K 线失败: {symbol}, {e}")
-            raise DataFetchError(f"BitgetFetcher 获取 K 线失败: {e}")
-    
-    def get_daily_data(
-        self,
-        stock_code: str,
-        start_date: Optional[str] = None,
-        end_date: Optional[str] = None,
-        days: int = 30
-    ) -> pd.DataFrame:
-        """
-        获取日线数据
-        
-        Args:
-            stock_code: 股票代码（如 SPCXUSDT）
-            start_date: 开始日期（YYYY-MM-DD）
-            end_date: 结束日期（YYYY-MM-DD）
-            days: 默认获取天数（如果未指定日期范围）
-            
-        Returns:
-            DataFrame with columns: 日期, 开盘, 收盘, 最高, 最低, 成交量, 成交额
-        """
-        # 处理日期参数
-        if not end_date:
-            end_date = datetime.now().strftime("%Y-%m-%d")
-        if not start_date:
-            start_date = (datetime.now() - pd.Timedelta(days=days)).strftime("%Y-%m-%d")
-        
-        logger.info(f"[BitgetFetcher] 开始获取 {stock_code} 日线数据: 范围={start_date} ~ {end_date}")
-        
-        df = self._fetch_raw_data(stock_code, start_date, end_date)
-        
-        if df.empty:
-            raise DataFetchError(f"BitgetFetcher 未获取到 {stock_code} 的数据")
-        
-        df = self._normalize_data(df, stock_code)
-        
-        return df[STANDARD_COLUMNS]
+            raise DataFetchError(f"BitgetFetcher 获取 K 线失败: {symbol}, {e}")
     
     def _normalize_data(self, df: pd.DataFrame, stock_code: str) -> pd.DataFrame:
         """标准化数据列名"""
         if df.empty:
             return df
         
-        # BitGet 返回的数据已经是标准化格式: date, open, close, high, low, volume, turnover
-        # 直接返回
+        # 直接返回，因为 _fetch_raw_data 已经返回标准化格式
         return df
     
     def get_realtime_quote(self, stock_code: str) -> Optional[UnifiedRealtimeQuote]:
