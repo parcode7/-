@@ -1180,6 +1180,14 @@ class DataFetcherManager:
         except ImportError as e:
             logger.warning(f"[数据源初始化] BinanceFetcher 导入失败: {e}")
 
+        # BitGet 股票代币数据源（无需 API Key，作为 BinanceFetcher 的备份）
+        try:
+            from .bitget_fetcher import BitgetFetcher
+            optional_fetchers.append(BitgetFetcher())
+            logger.debug("[数据源初始化] 已启用 BitgetFetcher")
+        except ImportError as e:
+            logger.warning(f"[数据源初始化] BitgetFetcher 导入失败: {e}")
+
         # 初始化数据源列表
         self._ensure_concurrency_guards()
         with self._fetchers_lock:
@@ -1289,8 +1297,8 @@ class DataFetcherManager:
             raise DataFetchError(error_summary)
 
         # 美股（含美股指数）使用专用路由；港股走下方通用数据源循环
-        # Failover chain: BinanceFetcher(无需API Key) -> Finnhub(P2) -> AlphaVantage(P3) -> Yfinance(P4) -> Longbridge(P5)
-        # When Longbridge preferred: Longbridge -> BinanceFetcher -> Finnhub -> AlphaVantage -> Yfinance
+        # Failover chain: BinanceFetcher -> BitgetFetcher(备份) -> Finnhub(P2) -> AlphaVantage(P3) -> Yfinance(P4) -> Longbridge(P5)
+        # When Longbridge preferred: Longbridge -> BinanceFetcher -> BitgetFetcher -> Finnhub -> AlphaVantage -> Yfinance
         if is_us:
             prefer_lb = self._longbridge_preferred(capability="daily_data") and not is_us_index
             if is_us_index:
@@ -1300,9 +1308,17 @@ class DataFetcherManager:
                 source_order = ["LongbridgeFetcher", "FinnhubFetcher", "AlphaVantageFetcher", "YfinanceFetcher"]
             else:
                 source_order = ["FinnhubFetcher", "AlphaVantageFetcher", "YfinanceFetcher", "LongbridgeFetcher"]
-            # 币安股票代币优先尝试 BinanceFetcher（无需 API Key，直接访问币安 API）
+            # 币安股票代币优先尝试 BinanceFetcher，失败后尝试 BitgetFetcher
             if self._get_fetcher_by_name("BinanceFetcher") is not None:
                 source_order = ["BinanceFetcher"] + source_order
+            if self._get_fetcher_by_name("BitgetFetcher") is not None:
+                # BitgetFetcher 作为 BinanceFetcher 的备份
+                if "BinanceFetcher" in source_order:
+                    # 在 BinanceFetcher 后面插入 BitgetFetcher
+                    idx = source_order.index("BinanceFetcher")
+                    source_order.insert(idx + 1, "BitgetFetcher")
+                else:
+                    source_order = ["BitgetFetcher"] + source_order
             market_label = "美股指数" if is_us_index else "美股"
 
             for order_index, src_name in enumerate(source_order):

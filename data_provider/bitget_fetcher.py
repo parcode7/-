@@ -1,0 +1,305 @@
+# -*- coding: utf-8 -*-
+"""
+===================================
+BitgetFetcher - BitGet 股票代币数据源
+===================================
+
+BitGet 支持股票代币化交易（如 SPCXUSDT、AAPLUSDT、TSLAUSDT 等）
+通过 BitGet 公开 API 获取 K线和实时行情
+
+API 文档: https://www.bitget.com/api-doc/uta/public/Get-History-Candle-Data
+
+特点：
+- 无需 API Key（公开市场数据）
+- 24/7 可交易
+- 数据延迟低
+- 可作为 BinanceFetcher 的备份数据源
+"""
+
+import logging
+import os
+import time
+from datetime import datetime
+from typing import Optional, List, Dict, Any
+
+import pandas as pd
+import requests
+from tenacity import (
+    retry,
+    stop_after_attempt,
+    wait_exponential,
+    retry_if_exception_type,
+    before_sleep_log,
+)
+
+from .base import BaseFetcher, DataFetchError, STANDARD_COLUMNS
+from .realtime_types import UnifiedRealtimeQuote, RealtimeSource
+
+logger = logging.getLogger(__name__)
+
+# BitGet API 基础地址
+BITGET_API_BASE = "https://api.bitget.com"
+
+# 股票代币后缀
+STOCK_TOKEN_SUFFIX = "USDT"
+
+# 请求超时
+_REQUEST_TIMEOUT = 10
+
+# 重试策略
+_TRANSIENT_EXCEPTIONS = (
+    requests.exceptions.SSLError,
+    requests.exceptions.ConnectionError,
+    requests.exceptions.Timeout,
+    requests.exceptions.ChunkedEncodingError,
+)
+
+
+def is_bitget_stock_token(code: str) -> bool:
+    """
+    判断是否为 BitGet 股票代币（如 SPCXUSDT、AAPLUSDT）
+    
+    规则：以 USDT 结尾
+    BitGet 股票代币的特点是有对应的美股标的
+    """
+    code = (code or "").strip().upper()
+    if not code.endswith(STOCK_TOKEN_SUFFIX) or code == STOCK_TOKEN_SUFFIX:
+        return False
+    return True
+
+
+def extract_bitget_symbol(code: str) -> str:
+    """从股票代码提取 BitGet 交易对（如 spcxusdt -> SPCXUSDT）"""
+    return code.strip().upper()
+
+
+@retry(
+    stop=stop_after_attempt(3),
+    wait=wait_exponential(multiplier=1, min=1, max=10),
+    retry=retry_if_exception_type(_TRANSIENT_EXCEPTIONS),
+    before_sleep=before_sleep_log(logger, logging.WARNING),
+    reraise=True,
+)
+def _get_with_retry(url: str, params: Optional[Dict[str, Any]] = None) -> requests.Response:
+    """GET with retry on transient network errors."""
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        "Accept": "application/json",
+    }
+    return requests.get(url, headers=headers, params=params or {}, timeout=_REQUEST_TIMEOUT)
+
+
+class BitgetFetcher(BaseFetcher):
+    """
+    BitGet 数据源 - 股票代币
+    
+    支持：
+    - 日线数据 (daily_data)
+    - 实时行情 (realtime_quote)
+    
+    使用 BitGet 现货市场 API，无需 API Key
+    """
+    
+    name = "BitgetFetcher"
+    priority = int(os.getenv("BITGET_PRIORITY", "0"))  # 默认最高优先级，与 BinanceFetcher 相同
+    
+    def __init__(self):
+        self._session = requests.Session()
+        self._session.headers.update({
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+            "Accept": "application/json",
+        })
+    
+    def _fetch_raw_data(
+        self, 
+        stock_code: str, 
+        start_date: str, 
+        end_date: str
+    ) -> pd.DataFrame:
+        """
+        获取 K 线数据
+        
+        API: GET /api/v3/market/history-candles
+        文档: https://www.bitget.com/api-doc/uta/public/Get-History-Candle-Data
+        """
+        symbol = extract_bitget_symbol(stock_code)
+        
+        # 转换日期为毫秒时间戳
+        start_ts = int(datetime.strptime(start_date, "%Y-%m-%d").timestamp() * 1000)
+        end_ts = int(datetime.strptime(end_date, "%Y-%m-%d").timestamp() * 1000)
+        
+        url = f"{BITGET_API_BASE}/api/v3/market/history-candles"
+        params = {
+            "category": "SPOT",  # 使用现货市场
+            "symbol": symbol,
+            "interval": "1D",  # 日线
+            "startTime": start_ts,
+            "endTime": end_ts,
+            "limit": "100",  # 最大 100 条（BitGet 限制）
+        }
+        
+        try:
+            resp = _get_with_retry(url, params)
+            resp.raise_for_status()
+            data = resp.json()
+            
+            if data.get("code") != "00000" or not data.get("data"):
+                logger.warning(f"[BitgetFetcher] API 返回错误: {data.get('msg', 'Unknown error')}")
+                raise DataFetchError(f"BitgetFetcher API 错误: {data.get('msg', 'Unknown error')}")
+            
+            candles = data["data"]
+            if not candles:
+                logger.warning(f"[BitgetFetcher] K线数据为空: {symbol}")
+                raise DataFetchError(f"BitgetFetcher K线数据为空: {symbol}")
+            
+            logger.debug(f"[BitgetFetcher] 获取K线成功: {symbol}, {len(candles)} 条")
+            
+            # 转换数据格式
+            # BitGet 返回格式: [timestamp, open, high, low, close, base_volume, quote_volume]
+            rows = []
+            for candle in candles:
+                ts = int(candle[0])
+                date_str = datetime.fromtimestamp(ts / 1000).strftime("%Y-%m-%d")
+                rows.append({
+                    "日期": date_str,
+                    "股票代码": symbol,
+                    "开盘": float(candle[1]),
+                    "收盘": float(candle[4]),
+                    "最高": float(candle[2]),
+                    "最低": float(candle[3]),
+                    "成交量": float(candle[5]),
+                    "成交额": float(candle[6]) if len(candle) > 6 else 0.0,
+                })
+            
+            df = pd.DataFrame(rows)
+            
+            # 过滤日期范围
+            df["日期"] = pd.to_datetime(df["日期"])
+            start_dt = pd.to_datetime(start_date)
+            end_dt = pd.to_datetime(end_date)
+            df = df[(df["日期"] >= start_dt) & (df["日期"] <= end_dt)]
+            
+            return df
+            
+        except requests.exceptions.HTTPError as e:
+            if e.response.status_code == 451:
+                logger.error(f"[BitgetFetcher] HTTP错误: 451 (地区不可用)")
+                raise DataFetchError(f"BitgetFetcher HTTP 451: 地区不可用")
+            logger.error(f"[BitgetFetcher] HTTP错误: {e}")
+            raise
+        except requests.exceptions.RequestException as e:
+            logger.error(f"[BitgetFetcher] 请求错误: {e}")
+            raise DataFetchError(f"BitgetFetcher 请求错误: {e}")
+        except Exception as e:
+            logger.error(f"[BitgetFetcher] 获取 K 线失败: {symbol}, {e}")
+            raise DataFetchError(f"BitgetFetcher 获取 K 线失败: {e}")
+    
+    def get_daily_data(
+        self,
+        stock_code: str,
+        start_date: Optional[str] = None,
+        end_date: Optional[str] = None,
+        days: int = 30
+    ) -> pd.DataFrame:
+        """
+        获取日线数据
+        
+        Args:
+            stock_code: 股票代码（如 SPCXUSDT）
+            start_date: 开始日期（YYYY-MM-DD）
+            end_date: 结束日期（YYYY-MM-DD）
+            days: 默认获取天数（如果未指定日期范围）
+            
+        Returns:
+            DataFrame with columns: 日期, 开盘, 收盘, 最高, 最低, 成交量, 成交额
+        """
+        # 处理日期参数
+        if not end_date:
+            end_date = datetime.now().strftime("%Y-%m-%d")
+        if not start_date:
+            start_date = (datetime.now() - pd.Timedelta(days=days)).strftime("%Y-%m-%d")
+        
+        logger.info(f"[BitgetFetcher] 开始获取 {stock_code} 日线数据: 范围={start_date} ~ {end_date}")
+        
+        df = self._fetch_raw_data(stock_code, start_date, end_date)
+        
+        if df.empty:
+            raise DataFetchError(f"BitgetFetcher 未获取到 {stock_code} 的数据")
+        
+        # 重命名列为标准列名
+        df = df.rename(columns={
+            "日期": "date",
+            "开盘": "open",
+            "收盘": "close",
+            "最高": "high",
+            "最低": "low",
+            "成交量": "volume",
+            "成交额": "turnover",
+        })
+        
+        return df[STANDARD_COLUMNS]
+    
+    def get_realtime_quote(self, stock_code: str) -> Optional[UnifiedRealtimeQuote]:
+        """
+        获取实时行情
+        
+        Args:
+            stock_code: 股票代码（如 SPCXUSDT）
+            
+        Returns:
+            UnifiedRealtimeQuote 或 None
+        """
+        symbol = extract_bitget_symbol(stock_code)
+        
+        url = f"{BITGET_API_BASE}/api/v3/spot/market/ticker"
+        params = {"symbol": symbol}
+        
+        try:
+            resp = _get_with_retry(url, params)
+            resp.raise_for_status()
+            data = resp.json()
+            
+            if data.get("code") != "00000" or not data.get("data"):
+                logger.warning(f"[BitgetFetcher] 实时行情 API 返回错误: {data.get('msg', 'Unknown error')}")
+                return None
+            
+            ticker = data["data"]
+            
+            return UnifiedRealtimeQuote(
+                stock_code=symbol,
+                price=float(ticker.get("last", 0)),
+                change=float(ticker.get("change24h", 0)),
+                change_pct=float(ticker.get("change24hPct", 0)) if ticker.get("change24hPct") is not None else 0.0,
+                volume=float(ticker.get("baseVolume", 0)),
+                turnover=float(ticker.get("quoteVolume", 0)),
+                high=float(ticker.get("high24h", 0)),
+                low=float(ticker.get("low24h", 0)),
+                source=RealtimeSource.BITGET,
+            )
+            
+        except requests.exceptions.HTTPError as e:
+            if e.response.status_code == 451:
+                logger.error(f"[BitgetFetcher] 实时行情 HTTP 451")
+                return None
+            logger.warning(f"[BitgetFetcher] 实时行情 HTTP错误: {e}")
+            return None
+        except requests.exceptions.RequestException as e:
+            logger.warning(f"[BitgetFetcher] 实时行情请求错误: {e}")
+            return None
+        except Exception as e:
+            logger.warning(f"[BitgetFetcher] 实时行情获取失败: {e}")
+            return None
+    
+    def health_check(self) -> bool:
+        """健康检查"""
+        url = f"{BITGET_API_BASE}/api/v3/spot/market/ticker"
+        params = {"symbol": "BTCUSDT"}
+        
+        try:
+            resp = _get_with_retry(url, params)
+            resp.raise_for_status()
+            data = resp.json()
+            return data.get("code") == "00000"
+        except Exception as e:
+            logger.warning(f"[BitgetFetcher] 健康检查失败: {e}")
+            return False

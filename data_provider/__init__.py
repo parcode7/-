@@ -42,6 +42,7 @@ from .longbridge_fetcher import LongbridgeFetcher
 from .finnhub_fetcher import FinnhubFetcher
 from .alphavantage_fetcher import AlphaVantageFetcher
 from .binance_fetcher import BinanceFetcher, is_binance_stock_token
+from .bitget_fetcher import BitgetFetcher, is_bitget_stock_token
 from .us_index_mapping import is_us_index_code, is_us_stock_code, get_us_index_yf_symbol, US_INDEX_MAPPING
 
 __all__ = [
@@ -58,7 +59,9 @@ __all__ = [
     'FinnhubFetcher',
     'AlphaVantageFetcher',
     'BinanceFetcher',
+    'BitgetFetcher',
     'is_binance_stock_token',
+    'is_bitget_stock_token',
     'is_us_index_code',
     'is_us_stock_code',
     'is_hk_stock_code',
