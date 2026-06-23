@@ -1289,8 +1289,8 @@ class DataFetcherManager:
             raise DataFetchError(error_summary)
 
         # 美股（含美股指数）使用专用路由；港股走下方通用数据源循环
-        # Failover chain: Finnhub(P2) -> AlphaVantage(P3) -> Yfinance(P4) -> Longbridge(P5)
-        # When Longbridge preferred: Longbridge -> Finnhub -> AlphaVantage -> Yfinance
+        # Failover chain: BinanceFetcher(无需API Key) -> Finnhub(P2) -> AlphaVantage(P3) -> Yfinance(P4) -> Longbridge(P5)
+        # When Longbridge preferred: Longbridge -> BinanceFetcher -> Finnhub -> AlphaVantage -> Yfinance
         if is_us:
             prefer_lb = self._longbridge_preferred(capability="daily_data") and not is_us_index
             if is_us_index:
@@ -1300,6 +1300,9 @@ class DataFetcherManager:
                 source_order = ["LongbridgeFetcher", "FinnhubFetcher", "AlphaVantageFetcher", "YfinanceFetcher"]
             else:
                 source_order = ["FinnhubFetcher", "AlphaVantageFetcher", "YfinanceFetcher", "LongbridgeFetcher"]
+            # 币安股票代币优先尝试 BinanceFetcher（无需 API Key，直接访问币安 API）
+            if self._get_fetcher_by_name("BinanceFetcher") is not None:
+                source_order = ["BinanceFetcher"] + source_order
             market_label = "美股指数" if is_us_index else "美股"
 
             for order_index, src_name in enumerate(source_order):

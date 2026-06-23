@@ -250,6 +250,15 @@ class BinanceFetcher(BaseFetcher):
             logger.error(f"[BinanceFetcher] 获取实时行情失败: {symbol}, {e}")
             return None
     
+    def is_available_for_request(self, capability: str = "") -> bool:
+        """
+        检查数据源是否可接受请求
+        
+        币安公开 API 通常总是可用的，直接返回 True
+        实际的 API 调用失败会在具体方法中处理
+        """
+        return True
+    
     def is_available(self) -> bool:
         """检查数据源可用性（健康检查）"""
         try:
